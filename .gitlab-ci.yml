@@ -1,0 +1,71 @@
+#
+# ICS 221 Lab 7 API Gitlab CI FILE
+# ------------------------------------
+# Purpose: This activates the GitLab CI Pipeline.
+# Author: Jason Cumiskey, March 2020
+#
+# NOTE:
+# -----
+# THIS CI FILE IS FOR AN API USING
+# NODE.JS WITH MONGODB
+#
+# **** DO NOT MODIFY THIS FILE!****
+#
+# GitLab Runner will build and then deploy it to Dokku (Deploy Server).
+#
+# ********* REQUIREMENTS FOR USING THIS *********************
+# Note to Instructor: SSH_PRIVATE_KEY var must be set 
+# in GitLab for the group this project is in.
+# ***********************************************************
+variables:
+  # set to clone. Slower but more reliable
+  GIT_STRATEGY: clone
+  # shallow clones break deployment - must disable
+  GIT_DEPTH: 0
+  # hostname of the DOKKU deployment server
+  DEPLOY_SRV: deploy.cs.camosun.bc.ca
+  APP_NAME: api.$CI_PROJECT_NAME.$DEPLOY_SRV
+
+before_script:
+  # --- SSH Settings to communicate with Dokku: DON'T MESS WITH THIS! ---
+  #- 'which ssh-agent || ( apt-get update -y && apt-get install openssh-client -y )'
+  - eval $(ssh-agent -s)
+  - ssh-add <(echo "$SSH_PRIVATE_KEY")
+  - mkdir -p ~/.ssh
+  - '[[ -f /.dockerenv ]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
+
+stages:
+  - deploy-db
+  - deploy-app
+
+deploy_db_to_dokku:
+  stage: deploy-db
+  environment: production
+  tags:
+    # use a deploy runner
+    - deploy
+  script:
+    # First, create the project if it isn't already created, otherwise skip
+    - 'ssh dokku@$DEPLOY_SRV apps:create $APP_NAME || true'
+    # Create DB if it hasn't been created
+    - 'ssh dokku@$DEPLOY_SRV mongo:create ${CI_PROJECT_NAME}_DB || true'
+    # Import Data Dump as long as DB hasn't been linked yet
+    - if ! ssh dokku@$DEPLOY_SRV mongo:linked ${CI_PROJECT_NAME}_DB $APP_NAME; then ssh dokku@$DEPLOY_SRV mongo:import ${CI_PROJECT_NAME}_DB < ./mongo_seed/msgs_db_dump.gz; fi
+    # link DB container to App if it hasn't been linked yet
+    - 'ssh dokku@$DEPLOY_SRV mongo:link ${CI_PROJECT_NAME}_DB $APP_NAME || true'
+
+deploy_app_to_dokku:
+  stage: deploy-app
+  environment: production
+  only:
+    - master
+  tags:
+    # use a deploy runner
+    - deploy
+  script:
+    # configure the let's encrypt email, set npm to production, set the JWT_SECRET env var
+    - ssh dokku@$DEPLOY_SRV config:set $APP_NAME DOKKU_LETSENCRYPT_EMAIL=$LE_EMAIL NPM_CONFIG_PRODUCTION=true JWT_SECRET=$JWT_SECRET
+    # push the app to the deploy server
+    - git-push dokku@$DEPLOY_SRV:$APP_NAME
+    # assign a HTTPS Certificate if process deployed and if one hasn't been assigned yet
+    - if [ "$(ssh dokku@$DEPLOY_SRV ps:report $APP_NAME --deployed)" = "true" ] && [ "$(ssh dokku@$DEPLOY_SRV certs:report $APP_NAME --ssl-enabled)" = "false" ]; then ssh dokku@$DEPLOY_SRV letsencrypt $APP_NAME; fi
